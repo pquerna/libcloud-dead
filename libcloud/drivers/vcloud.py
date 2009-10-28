@@ -62,14 +62,16 @@ class VCloudConnection(ConnectionUserAndKey):
     def check_org(self):
         self._get_auth_token() # the only way to get our org is by logging in.
 
+    def _get_auth_headers(self):
+        """Some providers need different headers than others"""
+        return {'Authorization': "Basic %s" % base64.b64encode('%s:%s' % (self.user_id, self.key)),
+                'Content-Length': 0}
+
     def _get_auth_token(self):
         if not self.token:
-            headers = {'Authentication': base64.b64encode('%s:%s' % (self.user_id, self.key)),
-                       'Content-Length': 0} 
-
             conn = self.conn_classes[self.secure](self.host, 
                                                   self.port[self.secure])
-            conn.request(method='POST', url='/api/v0.8/login', headers=headers)
+            conn.request(method='POST', url='/api/v0.8/login', headers=self._get_auth_headers())
 
             resp = conn.getresponse()
             headers = dict(resp.getheaders())
@@ -128,7 +130,15 @@ class VCloudNodeDriver(NodeDriver):
                     driver=self.connection.driver)
 
         return node
-    
+
+    def _get_catalog_hrefs(self):
+        res = self.connection.request(self.org)
+        catalogs = [get_url_path(i.get('href'))
+                    for i in res.object.findall(fixxpath(res.object, "Link"))
+                    if i.get('type') == 'application/vnd.vmware.vcloud.catalog+xml']
+
+        return catalogs
+
     def destroy_node(self, node):
         self.connection.request('/vapp/%s/power/action/poweroff' % node.id,
                                 method='POST') 
@@ -137,7 +147,6 @@ class VCloudNodeDriver(NodeDriver):
                                           method='POST')
         except ExpatError: # the undeploy response is malformed XML atm. We can remove this whent he providers fix the problem.
             return True
-
         return res.status == 202
 
     def reboot_node(self, node):
@@ -156,7 +165,10 @@ class VCloudNodeDriver(NodeDriver):
                                i.get('name')]
 
             for vapp_name, vapp_href in vapps:
-                res = self.connection.request(vapp_href)
+                res = self.connection.request(
+                    vapp_href,
+                    headers={'Content-Type': 'application/vnd.vmware.vcloud.vApp+xml'}
+                )
                 nodes.append(self._to_node(vapp_name, res.object))
 
         return nodes
@@ -167,13 +179,40 @@ class VCloudNodeDriver(NodeDriver):
             res = self.connection.request(vdc).object
             res_ents = res.findall(fixxpath(res, "ResourceEntities/ResourceEntity"))
             images += [self._to_image(i) 
-                        for i in res_ents 
-                            if i.get('type') == 'application/vnd.vmware.vcloud.vAppTemplate+xml']
+                       for i in res_ents 
+                       if i.get('type') == 'application/vnd.vmware.vcloud.vAppTemplate+xml']
+        
+        for catalog in self._get_catalog_hrefs():
+            res = self.connection.request(
+                catalog,
+                headers={'Content-Type': 'application/vnd.vmware.vcloud.catalog+xml'}
+            ).object
+
+            cat_items = res.findall(fixxpath(res, "CatalogItems/CatalogItem"))
+            cat_item_hrefs = [i.get('href')
+                              for i in cat_items
+                              if i.get('type') == 'application/vnd.vmware.vcloud.catalogItem+xml']
+
+            for cat_item in cat_item_hrefs:
+                res = self.connection.request(
+                    cat_item,
+                    headers={'Content-Type': 'application/vnd.vmware.vcloud.catalogItem+xml'}
+                ).object
+                res_ents = res.findall(fixxpath(res, 'Entity'))
+                images += [self._to_image(i)
+                           for i in res_ents
+                           if i.get('type') ==  'application/vnd.vmware.vcloud.vAppTemplate+xml']
 
         return images
 
 class HostingComConnection(VCloudConnection):
     host = "vcloud.safesecureweb.com" 
+    
+    def _get_auth_headers(self):
+        """hosting.com doesn't follow the standard vCloud authentication API"""
+        return {'Authentication': base64.b64encode('%s:%s' % (self.user_id, self.key)),
+                   'Content-Length': 0} 
+
 
 class HostingComDriver(VCloudNodeDriver):
     connectionCls = HostingComConnection
