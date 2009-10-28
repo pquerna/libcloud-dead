@@ -290,3 +290,12 @@ class IResponseFactory(Interface):
         Process the given response, setting ivars.
         """
 
+
+class IStorageDriver(Interface):
+    """
+    A driver which provides storage instances, such as an Amazon S3, or RackSpace Cloud Files
+    """
+    connection = Attribute("""Represents the IStorageConnection for this driver""")
+    type = Attribute("""The type of this provider as defined by L{Provider}""")
+    name = Attribute("""A pretty name (Linode, etc) for this provider""")
+
